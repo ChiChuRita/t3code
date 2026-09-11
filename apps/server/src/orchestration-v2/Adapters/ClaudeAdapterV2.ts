@@ -2166,6 +2166,15 @@ function buildAssistantArtifacts(input: {
   readonly ordinal: number;
   readonly startedAt: DateTime.Utc;
   readonly completedAt: DateTime.Utc;
+  /**
+   * Set when the text came from a subagent frame, which lands in that
+   * subagent's child thread rather than the parent conversation. Mirrors how
+   * child tool calls detach from the parent run.
+   */
+  readonly subagent?: {
+    readonly childThreadId: ThreadId;
+    readonly childRootNodeId: OrchestrationV2ExecutionNode["id"];
+  };
 }): {
   readonly node: OrchestrationV2ExecutionNode;
   readonly message: OrchestrationV2ConversationMessage;
@@ -2188,19 +2197,26 @@ function buildAssistantArtifacts(input: {
     nativeId: input.nativeItemId,
     strength: "strong" as const,
   };
+  // A child frame detaches from the parent run the same way a child tool call
+  // does: no run, and therefore no parent provider turn to hang it off.
+  const threadId = input.subagent?.childThreadId ?? input.turnInput.threadId;
+  const runId = input.subagent === undefined ? input.turnInput.runId : null;
+  const rootNodeId = input.subagent?.childRootNodeId ?? input.turnInput.rootNodeId;
+  const providerThreadId = runId === null ? null : input.turnInput.providerThread.id;
+  const providerTurnId = runId === null ? null : input.providerTurnId;
 
   return {
     node: {
       id: nodeId,
-      threadId: input.turnInput.threadId,
-      runId: input.turnInput.runId,
-      parentNodeId: input.turnInput.rootNodeId,
-      rootNodeId: input.turnInput.rootNodeId,
+      threadId,
+      runId,
+      parentNodeId: rootNodeId,
+      rootNodeId,
       kind: "assistant_message",
       status: "completed",
       countsForRun: false,
-      providerThreadId: input.turnInput.providerThread.id,
-      providerTurnId: input.providerTurnId,
+      providerThreadId,
+      providerTurnId,
       nativeItemRef,
       runtimeRequestId: null,
       checkpointScopeId: null,
@@ -2211,8 +2227,8 @@ function buildAssistantArtifacts(input: {
       createdBy: "agent",
       creationSource: "provider",
       id: messageId,
-      threadId: input.turnInput.threadId,
-      runId: input.turnInput.runId,
+      threadId,
+      runId,
       nodeId,
       role: "assistant",
       text: input.text,
@@ -2223,11 +2239,11 @@ function buildAssistantArtifacts(input: {
     },
     turnItem: {
       id: turnItemId,
-      threadId: input.turnInput.threadId,
-      runId: input.turnInput.runId,
+      threadId,
+      runId,
       nodeId,
-      providerThreadId: input.turnInput.providerThread.id,
-      providerTurnId: input.providerTurnId,
+      providerThreadId,
+      providerTurnId,
       nativeItemRef,
       parentItemId: null,
       ordinal: input.ordinal,
@@ -2303,7 +2319,14 @@ interface ActiveClaudeTurnContext {
   readonly assistant: {
     fallbackText: string;
     fallbackNativeItemId: string;
+    /** Dedup key set, parent and subagent text alike. */
     emittedNativeItemIds: Set<string>;
+    /**
+     * Whether this turn produced assistant text for the parent conversation.
+     * Subagent text does not count: it lands in a child thread, so a turn that
+     * only relayed subagent narration still needs its result-text fallback.
+     */
+    emittedParentText: boolean;
   };
   readonly toolCalls: Map<string, ActiveClaudeToolCall>;
   readonly ignoredTaskIds: Set<string>;
@@ -2326,6 +2349,12 @@ interface ActiveClaudeProviderRetry {
 
 interface ActiveClaudeSubagent {
   task: OrchestrationV2Subagent;
+  /**
+   * The Agent tool_use id child frames carry as `parent_tool_use_id`. Held on
+   * the record itself so the session registry can answer a routing lookup on a
+   * turn whose per-turn maps never saw this subagent.
+   */
+  readonly toolUseId: string | null;
   readonly childThreadId: ThreadId;
   readonly childRootNodeId: OrchestrationV2ExecutionNode["id"];
   readonly turnItemId: OrchestrationV2TurnItem["id"];
@@ -3212,6 +3241,33 @@ export function makeClaudeAdapterV2(
           });
         });
 
+        /**
+         * Resolves the subagent a child frame belongs to from the Agent
+         * tool_use id it carries as `parent_tool_use_id`.
+         *
+         * The per-turn map alone is not enough. A background subagent keeps
+         * streaming after the root turn's `result`, and that output is drained
+         * into a continuation turn whose maps start empty. `task_progress` is
+         * the only frame that would refill them and it never reaches the
+         * buffer (see the wake-evidence filter), so without the session
+         * registry every child frame after settle routes to the parent thread.
+         */
+        const subagentByToolUseId = Effect.fnUntraced(function* (
+          context: ActiveClaudeTurnContext,
+          toolUseId: string,
+        ) {
+          const active = context.subagentsByToolUseId.get(toolUseId);
+          if (active !== undefined) {
+            return active;
+          }
+          for (const registered of (yield* Ref.get(sessionSubagentsByTaskId)).values()) {
+            if (registered.toolUseId === toolUseId) {
+              return registered;
+            }
+          }
+          return undefined;
+        });
+
         const updateClaudeSubagentNode = Effect.fnUntraced(function* (input: {
           readonly context: ActiveClaudeTurnContext;
           readonly taskId: string;
@@ -3348,6 +3404,7 @@ export function makeClaudeAdapterV2(
           } satisfies OrchestrationV2Subagent;
           const subagent = {
             task,
+            toolUseId: input.toolUseId ?? existingSubagent?.toolUseId ?? null,
             childThreadId,
             childRootNodeId,
             turnItemId:
@@ -3770,7 +3827,7 @@ export function makeClaudeAdapterV2(
           const subagent =
             input.parentToolUseId === null
               ? undefined
-              : input.context.subagentsByToolUseId.get(input.parentToolUseId);
+              : yield* subagentByToolUseId(input.context, input.parentToolUseId);
           const threadId = subagent?.childThreadId ?? input.context.input.threadId;
           const runId = subagent === undefined ? input.context.input.runId : null;
           const rootNodeId = subagent?.childRootNodeId ?? input.context.input.rootNodeId;
@@ -3946,7 +4003,7 @@ export function makeClaudeAdapterV2(
           input.context.toolCalls.clear();
 
           if (
-            input.context.assistant.emittedNativeItemIds.size === 0 &&
+            !input.context.assistant.emittedParentText &&
             input.context.assistant.fallbackText.length > 0
           ) {
             const ordinal = yield* resolveItemOrdinal(
@@ -4135,13 +4192,27 @@ export function makeClaudeAdapterV2(
           readonly context: ActiveClaudeTurnContext;
           readonly nativeItemId: string;
           readonly text: string;
+          readonly parentToolUseId: string | null;
         }) {
           if (input.context.assistant.emittedNativeItemIds.has(input.nativeItemId)) {
             return;
           }
           input.context.assistant.emittedNativeItemIds.add(input.nativeItemId);
           const now = yield* DateTime.now;
-          const ordinal = yield* resolveItemOrdinal(input.context, input.nativeItemId);
+          // A subagent narrates into its own thread. Its ordinals come from the
+          // subagent's child counter so they interleave with the child's tool
+          // calls rather than competing with the parent conversation.
+          const subagent =
+            input.parentToolUseId === null
+              ? undefined
+              : yield* subagentByToolUseId(input.context, input.parentToolUseId);
+          const ordinal =
+            subagent === undefined
+              ? yield* resolveItemOrdinal(input.context, input.nativeItemId)
+              : ++subagent.nextChildItemOrdinal;
+          if (subagent === undefined) {
+            input.context.assistant.emittedParentText = true;
+          }
           const artifacts = buildAssistantArtifacts({
             idAllocator,
             turnInput: input.context.input,
@@ -4151,6 +4222,14 @@ export function makeClaudeAdapterV2(
             ordinal,
             startedAt: now,
             completedAt: now,
+            ...(subagent === undefined
+              ? {}
+              : {
+                  subagent: {
+                    childThreadId: subagent.childThreadId,
+                    childRootNodeId: subagent.childRootNodeId,
+                  },
+                }),
           });
           yield* Effect.all(
             [
@@ -4749,7 +4828,7 @@ export function makeClaudeAdapterV2(
               typeof message.message.model === "string" ? message.message.model.trim() : "";
             const model = snapshotModel.length === 0 ? undefined : snapshotModel;
             if (parentToolUseId !== null && model !== undefined) {
-              const subagent = context.subagentsByToolUseId.get(parentToolUseId);
+              const subagent = yield* subagentByToolUseId(context, parentToolUseId);
               if (subagent === undefined) {
                 rememberPendingClaudeSubagentModel(
                   context.pendingSubagentModelsByToolUseId,
@@ -4888,7 +4967,7 @@ export function makeClaudeAdapterV2(
           }
 
           for (const { toolResult, output } of claudeToolResultEntriesFromMessage(message)) {
-            const subagent = context.subagentsByToolUseId.get(toolResult.tool_use_id);
+            const subagent = yield* subagentByToolUseId(context, toolResult.tool_use_id);
             // A resume task_started reuses the resuming tool call's
             // tool_use_id (e.g. SendMessage), whose tool_result only
             // acknowledges delivery. Only the Agent launch's tool_result may
@@ -4948,6 +5027,7 @@ export function makeClaudeAdapterV2(
               context,
               nativeItemId: assistantText.nativeItemId,
               text: assistantText.text,
+              parentToolUseId: parentToolUseIdFromSdkMessage(message),
             });
             return;
           }
@@ -5014,7 +5094,7 @@ export function makeClaudeAdapterV2(
               ? null
               : resultTextFromSdkMessage(message);
           if (
-            context.assistant.emittedNativeItemIds.size === 0 &&
+            !context.assistant.emittedParentText &&
             context.assistant.fallbackText.length === 0 &&
             resultText !== null &&
             resultText.text.length > 0
@@ -5503,6 +5583,7 @@ export function makeClaudeAdapterV2(
                 fallbackText: "",
                 fallbackNativeItemId: `assistant:${turnInput.runId}`,
                 emittedNativeItemIds: new Set(),
+                emittedParentText: false,
               },
               toolCalls: new Map(),
               ignoredTaskIds: new Set(),

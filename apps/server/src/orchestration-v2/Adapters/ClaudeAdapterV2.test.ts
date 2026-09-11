@@ -4270,6 +4270,175 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
+  it.effect("keeps subagent output in the child thread after the root turn settled", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const TASK_ID = "task-child-routing";
+        const TOOL_USE_ID = "toolu-child-routing";
+        const harness = yield* makeWakeHarness;
+        const now = yield* DateTime.now;
+        const turnItems = () =>
+          harness.events.filter(
+            (event): event is Extract<ProviderAdapterV2Event, { type: "turn_item.updated" }> =>
+              event.type === "turn_item.updated",
+          );
+        const itemNamed = (nativeId: string) =>
+          turnItems()
+            .filter((event) => event.turnItem.nativeItemRef?.nativeId === nativeId)
+            .at(-1)?.turnItem;
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-child-routing-a"),
+            text: "Spawn a background subagent and stop.",
+            attachments: [],
+          }),
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          claudeSdkFrame({
+            type: "system",
+            subtype: "task_started",
+            task_id: TASK_ID,
+            tool_use_id: TOOL_USE_ID,
+            description: "Inspect the repository",
+            subagent_type: "general-purpose",
+            task_type: "local_agent",
+            prompt: "Inspect the repository and report back.",
+            uuid: "00000000-0000-4000-8000-000000000301",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+        );
+        yield* awaitUntil(
+          () => harness.events.some((event) => event.type === "app_thread.created"),
+          "subagent child thread created",
+        );
+        const childThreadId = harness.events.find(
+          (event): event is Extract<ProviderAdapterV2Event, { type: "app_thread.created" }> =>
+            event.type === "app_thread.created",
+        )?.appThread.id;
+        assert.isDefined(childThreadId);
+        assert.notEqual(childThreadId, harness.threadId);
+
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000302",
+            result: "Spawned the subagent in the background.",
+          }),
+        );
+        yield* awaitUntil(() => harness.terminalEvents().length === 1, "root turn terminal");
+
+        // Child frames that arrive after the root turn settled are buffered as
+        // wake evidence and replayed into a continuation turn whose per-turn
+        // subagent maps start empty. task_progress is not wake evidence, so it
+        // never reaches that replay to refill them: this is exactly where
+        // child output used to fall through into the parent conversation.
+        yield* Queue.offer(
+          harness.sdkMessages,
+          claudeSdkFrame({
+            type: "assistant",
+            message: {
+              model: "claude-sonnet-4-6",
+              id: "msg_child_tool",
+              type: "message",
+              role: "assistant",
+              content: [
+                {
+                  type: "tool_use",
+                  id: "tool-child-read",
+                  name: "Read",
+                  input: { file_path: "/tmp/ledger/index.js" },
+                },
+              ],
+              stop_reason: "tool_use",
+              stop_sequence: null,
+            },
+            parent_tool_use_id: TOOL_USE_ID,
+            uuid: "00000000-0000-4000-8000-000000000303",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          claudeSdkFrame({
+            type: "assistant",
+            message: {
+              model: "claude-sonnet-4-6",
+              id: "msg_child_text",
+              type: "message",
+              role: "assistant",
+              content: [{ type: "text", text: "CHILD_NARRATION" }],
+              stop_reason: "end_turn",
+              stop_sequence: null,
+            },
+            parent_tool_use_id: TOOL_USE_ID,
+            uuid: "00000000-0000-4000-8000-000000000304",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+        );
+        yield* Queue.offer(
+          harness.sdkMessages,
+          claudeSdkFrame({
+            type: "system",
+            subtype: "task_notification",
+            task_id: TASK_ID,
+            tool_use_id: TOOL_USE_ID,
+            status: "completed",
+            output_file: "/tmp/task-child-routing.output",
+            summary: "CHILD_SUMMARY",
+            uuid: "00000000-0000-4000-8000-000000000305",
+            session_id: WAKE_NATIVE_SESSION,
+          }),
+        );
+        // The notification is the last buffered frame, so a continuation
+        // request proves the two child frames were buffered ahead of it.
+        yield* awaitUntil(() => harness.continuationRequests.length === 1, "continuation request");
+        yield* Queue.offer(
+          harness.sdkMessages,
+          makeResultFrame({
+            uuid: "00000000-0000-4000-8000-000000000306",
+            result: "The subagent finished.",
+          }),
+        );
+
+        yield* harness.runtime.startTurn(
+          makeClaudeTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-claude-child-routing-b"),
+            text: "Background task completed.",
+            attachments: [],
+            providerTurnOrdinal: 2,
+            messageCreatedBy: "agent",
+            messageCreationSource: "provider",
+          }),
+        );
+        yield* awaitUntil(() => harness.terminalEvents().length === 2, "continuation terminal");
+
+        const childTool = itemNamed("tool-child-read");
+        assert.equal(childTool?.threadId, childThreadId);
+        // A child item belongs to no parent run, so it carries neither the
+        // parent's run nor its provider turn.
+        assert.isNull(childTool?.runId ?? null);
+
+        const childText = turnItems()
+          .filter(
+            (event) =>
+              event.turnItem.type === "assistant_message" &&
+              event.turnItem.text === "CHILD_NARRATION",
+          )
+          .at(-1)?.turnItem;
+        assert.equal(childText?.threadId, childThreadId);
+        assert.isNull(childText?.runId ?? null);
+      }).pipe(Effect.provide(Layer.merge(idAllocatorLayer, NodeServices.layer))),
+    ),
+  );
+
   it.effect("keeps a subagent snapshot model that arrives before task_started", () =>
     Effect.scoped(
       Effect.gen(function* () {

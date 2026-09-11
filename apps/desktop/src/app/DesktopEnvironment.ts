@@ -44,6 +44,13 @@ export class DesktopEnvironment extends Context.Service<
     readonly resourcesPath: string;
     readonly homeDirectory: string;
     readonly appDataDirectory: string;
+    /**
+     * Electron scopes both the Chromium profile and the single-instance lock to
+     * the user-data directory, so a locally built T3 sharing it with an installed
+     * one fights over the same LevelDB files and can focus the wrong window.
+     * Set T3CODE_DESKTOP_USER_DATA_DIR_NAME to run a fork beside a stable install.
+     */
+    readonly userDataDirNameOverride: Option.Option<string>;
     readonly baseDir: string;
     readonly stateDir: string;
     readonly desktopSettingsPath: string;
@@ -202,6 +209,7 @@ const make = Effect.fn("desktop.environment.make")(function* (
     resourcesPath,
     homeDirectory,
     appDataDirectory,
+    userDataDirNameOverride: config.userDataDirNameOverride,
     baseDir,
     stateDir,
     desktopSettingsPath: path.join(stateDir, "desktop-settings.json"),

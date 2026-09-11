@@ -1,5 +1,6 @@
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
@@ -37,12 +38,23 @@ export const resolveUserDataPath = Effect.fn("desktop.userData.resolveUserDataPa
     readonly appDataDirectory: string;
     readonly isDevelopment: boolean;
     readonly platform: NodeJS.Platform;
+    readonly userDataDirNameOverride?: Option.Option<string> | undefined;
   }) {
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const names = input.isDevelopment
+    const defaults = input.isDevelopment
       ? { current: "t3code-dev", legacy: "T3 Code (Dev)" }
       : { current: "t3code-v2", legacy: "T3 Code (Alpha)" };
+    // A fork sharing this directory with an installed T3 fights over the same
+    // Chromium LevelDB files and single-instance lock, and can focus the wrong
+    // window. T3CODE_DESKTOP_USER_DATA_DIR_NAME gives it its own.
+    const names = {
+      ...defaults,
+      current: Option.getOrElse(
+        input.userDataDirNameOverride ?? Option.none(),
+        () => defaults.current,
+      ),
+    };
     const destinationPath = path.join(input.appDataDirectory, names.current);
     const legacyPath = path.join(input.appDataDirectory, names.legacy);
     const inspect = (resourcePath: string) =>

@@ -6898,6 +6898,8 @@ export default function ChatView(props: ChatViewProps) {
       resumeCompactionBannerItem === null ? [] : [resumeCompactionBannerItem];
     const wokeThreadItems = wokeThreadBannerItem === null ? [] : [wokeThreadBannerItem];
     const parkedThreadItems = parkedThreadBannerItem === null ? [] : [parkedThreadBannerItem];
+    const detachedSubagentItems =
+      detachedSubagentBannerItem === null ? [] : [detachedSubagentBannerItem];
     // The user asked for this one, so it leads the notice tier instead of trailing it.
     const usageLimitsItems = usageLimitsBanner === null ? [] : [usageLimitsBanner];
     const projectCloneItems = projectCloneBannerItem === null ? [] : [projectCloneBannerItem];
@@ -6910,6 +6912,7 @@ export default function ChatView(props: ChatViewProps) {
         ...backgroundWorkItems,
         ...resumeCompactionItems,
         ...wokeThreadItems,
+        ...detachedSubagentItems,
         ...parkedThreadItems,
       ];
     }
@@ -6959,7 +6962,7 @@ export default function ChatView(props: ChatViewProps) {
           setBranchMismatchDismissTick((tick) => tick + 1);
         },
       },
-      ...(detachedSubagentBannerItem === null ? [] : [detachedSubagentBannerItem]),
+      ...detachedSubagentItems,
       ...parkedThreadItems,
     ];
   }, [

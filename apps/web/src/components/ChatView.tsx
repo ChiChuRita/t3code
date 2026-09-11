@@ -268,6 +268,7 @@ import {
   DownloadIcon,
   GitBranchIcon,
   WifiOffIcon,
+  BotIcon,
 } from "lucide-react";
 import { cn, randomUUID } from "~/lib/utils";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
@@ -6809,6 +6810,32 @@ export default function ChatView(props: ChatViewProps) {
       onDismiss: acknowledgeActiveThreadWoke,
     };
   }, [acknowledgeActiveThreadWoke, activeThread?.id, activeThreadWokeVisible]);
+  /**
+   * A subagent child thread is only resumable when the provider handed back an
+   * addressable session for it. Claude does not, so sending here opens a fresh
+   * session that knows nothing about the work shown above. Say so rather than
+   * letting the composer imply continuity it cannot deliver.
+   */
+  const detachedSubagentBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
+    if (
+      activeThread?.lineage.relationshipToParent !== "subagent" ||
+      activeThread.activeProviderThreadId !== null
+    ) {
+      return null;
+    }
+    return {
+      id: `subagent-detached:${activeThread.id}`,
+      variant: "info",
+      priority: "notice",
+      icon: <BotIcon />,
+      title: "This subagent cannot be resumed",
+      description: "Sending starts a new session that does not carry its context",
+    };
+  }, [
+    activeThread?.activeProviderThreadId,
+    activeThread?.id,
+    activeThread?.lineage.relationshipToParent,
+  ]);
   const parkedThreadBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
     if (!activeThreadSnoozed && !activeThreadSettled) {
       return null;
@@ -7000,6 +7027,8 @@ export default function ChatView(props: ChatViewProps) {
       resumeCompactionBannerItem === null ? [] : [resumeCompactionBannerItem];
     const wokeThreadItems = wokeThreadBannerItem === null ? [] : [wokeThreadBannerItem];
     const parkedThreadItems = parkedThreadBannerItem === null ? [] : [parkedThreadBannerItem];
+    const detachedSubagentItems =
+      detachedSubagentBannerItem === null ? [] : [detachedSubagentBannerItem];
     // The user asked for this one, so it leads the notice tier instead of trailing it.
     const usageLimitsItems = usageLimitsBanner === null ? [] : [usageLimitsBanner];
     const projectCloneItems = projectCloneBannerItem === null ? [] : [projectCloneBannerItem];
@@ -7013,6 +7042,7 @@ export default function ChatView(props: ChatViewProps) {
         ...backgroundWorkItems,
         ...resumeCompactionItems,
         ...wokeThreadItems,
+        ...detachedSubagentItems,
         ...parkedThreadItems,
       ];
     }
@@ -7063,6 +7093,7 @@ export default function ChatView(props: ChatViewProps) {
           setBranchMismatchDismissTick((tick) => tick + 1);
         },
       },
+      ...detachedSubagentItems,
       ...parkedThreadItems,
     ];
   }, [
@@ -7074,6 +7105,7 @@ export default function ChatView(props: ChatViewProps) {
     handleRestoreThreadBranch,
     isRestoringThreadBranch,
     backgroundWorkBannerItem,
+    detachedSubagentBannerItem,
     localCheckoutBranchMismatch,
     parkedThreadBannerItem,
     projectCloneBannerItem,

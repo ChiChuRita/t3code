@@ -72,6 +72,11 @@ export interface RuntimeSubagent {
   readonly result: string | null;
   readonly error: string | null;
   readonly outputFile: string | null;
+  /**
+   * The app thread carrying this subagent's own transcript, when the provider
+   * exposes one. Null for sources that only report a roster entry.
+   */
+  readonly childThreadId: string | null;
   readonly parentAgentId: string | null;
   readonly agentIndex: number | null;
   readonly phaseIndex: number | null;
@@ -241,6 +246,7 @@ interface MutableAgent {
   result: string | null;
   error: string | null;
   outputFile: string | null;
+  childThreadId: string | null;
   parentAgentId: string | null;
   agentIndex: number | null;
   phaseIndex: number | null;
@@ -298,6 +304,7 @@ function getOrCreate(
     result: null,
     error: null,
     outputFile: null,
+    childThreadId: null,
     parentAgentId: asString(payload.parentAgentId) ?? null,
     agentIndex: asCount(payload.agentIndex) ?? null,
     phaseIndex: asCount(payload.phaseIndex) ?? null,
@@ -732,6 +739,7 @@ export function projectedSubagentsToRuntime(
     readonly prompt: string;
     readonly model: string | null;
     readonly status: OrchestrationV2Subagent["status"];
+    readonly childThreadId?: OrchestrationV2Subagent["childThreadId"] | undefined;
     readonly progress?: string | undefined;
     readonly result: string | null;
     readonly startedAt: DateTime.Utc | null;
@@ -759,6 +767,7 @@ export function projectedSubagentsToRuntime(
       result: subagent.result,
       error: subagent.status === "failed" ? (subagent.result ?? null) : null,
       outputFile: null,
+      childThreadId: subagent.childThreadId ?? null,
       parentAgentId: null,
       agentIndex: null,
       phaseIndex: null,

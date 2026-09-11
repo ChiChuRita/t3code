@@ -241,6 +241,7 @@ import { makeWorkspaceFileDropHandlers } from "./chat/workspaceFileDrop";
 import ThreadTerminalDrawer from "./ThreadTerminalDrawer";
 import {
   AlarmClockIcon,
+  BotIcon,
   CheckCircle2Icon,
   PaperclipIcon,
   ChevronDownIcon,
@@ -6700,6 +6701,32 @@ export default function ChatView(props: ChatViewProps) {
       onDismiss: acknowledgeActiveThreadWoke,
     };
   }, [acknowledgeActiveThreadWoke, activeThread?.id, activeThreadWokeVisible]);
+  /**
+   * A subagent child thread is only resumable when the provider handed back an
+   * addressable session for it. Claude does not, so sending here opens a fresh
+   * session that knows nothing about the work shown above. Say so rather than
+   * letting the composer imply continuity it cannot deliver.
+   */
+  const detachedSubagentBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
+    if (
+      activeThread?.lineage.relationshipToParent !== "subagent" ||
+      activeThread.activeProviderThreadId !== null
+    ) {
+      return null;
+    }
+    return {
+      id: `subagent-detached:${activeThread.id}`,
+      variant: "info",
+      priority: "notice",
+      icon: <BotIcon />,
+      title: "This subagent cannot be resumed",
+      description: "Sending starts a new session that does not carry its context",
+    };
+  }, [
+    activeThread?.activeProviderThreadId,
+    activeThread?.id,
+    activeThread?.lineage.relationshipToParent,
+  ]);
   const parkedThreadBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
     if (!activeThreadSnoozed && !activeThreadSettled) {
       return null;
@@ -6932,9 +6959,11 @@ export default function ChatView(props: ChatViewProps) {
           setBranchMismatchDismissTick((tick) => tick + 1);
         },
       },
+      ...(detachedSubagentBannerItem === null ? [] : [detachedSubagentBannerItem]),
       ...parkedThreadItems,
     ];
   }, [
+    detachedSubagentBannerItem,
     activeBranchMismatchKey,
     feedbackBannerItems,
     handleRestoreThreadBranch,
@@ -9502,6 +9531,7 @@ export default function ChatView(props: ChatViewProps) {
         model={agentPanelModel}
         environmentId={activeThreadRef?.environmentId ?? null}
         threadId={activeThreadRef?.threadId ?? null}
+        onOpenThread={onOpenRelatedThread}
       />
     ) : renderedRightPanelSurface?.kind === "device" ? (
       <Suspense fallback={null}>

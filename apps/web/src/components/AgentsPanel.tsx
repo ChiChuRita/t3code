@@ -20,8 +20,10 @@ import {
   formatSubagentModelLabel,
   formatSubagentTokenCount,
 } from "@t3tools/client-runtime/state/subagentRuntime";
-import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import type { EnvironmentId } from "@t3tools/contracts";
+import { ThreadId } from "@t3tools/contracts";
 import { Bot, Braces, Check, ChevronDown, ChevronRight, X } from "lucide-react";
+import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useEffect, useRef, useState } from "react";
 
 import { cn } from "~/lib/utils";
@@ -137,7 +139,18 @@ function agentActivityText(agent: RuntimeSubagent): string | null {
 }
 
 /** Flat, non-interactive agent status line. No unfold. */
-function AgentRow({ agent }: { agent: RuntimeSubagent }) {
+/**
+ * A roster row. When the subagent owns a child thread the whole row opens it,
+ * which is the only place most users look for a way into a subagent's own
+ * transcript. Rows without one stay inert rather than offering a dead target.
+ */
+function AgentRow({
+  agent,
+  onOpenThread,
+}: {
+  agent: RuntimeSubagent;
+  onOpenThread?: ((threadId: ThreadId) => void) | undefined;
+}) {
   const visuals = STATUS_VISUALS[agent.status];
   const statusLabel =
     agent.kind === "subagent_batch" && agent.status === "idle" ? "Idle" : visuals.label;
@@ -154,8 +167,34 @@ function AgentRow({ agent }: { agent: RuntimeSubagent }) {
     agent.activationCount > 1 ? `run ${agent.activationCount}` : null,
   ].filter((value): value is string => value !== null);
 
+  const childThreadId = agent.childThreadId;
+  const openThread =
+    childThreadId !== null && onOpenThread !== undefined
+      ? () => onOpenThread(ThreadId.make(childThreadId))
+      : null;
+
   return (
-    <div className="grid h-[3.875rem] grid-cols-[0.375rem_minmax(0,1fr)_auto] grid-rows-[1.25rem_1.125rem_1rem] items-center gap-x-2 rounded-md px-1.5 py-1">
+    <div
+      {...(openThread === null
+        ? {}
+        : {
+            role: "button" as const,
+            tabIndex: 0,
+            "aria-label": `Open ${agent.title} transcript`,
+            onClick: openThread,
+            onKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => {
+              if (event.key !== "Enter" && event.key !== " ") return;
+              event.preventDefault();
+              openThread();
+            },
+          })}
+      className={cn(
+        "grid h-[3.875rem] grid-cols-[0.375rem_minmax(0,1fr)_auto] grid-rows-[1.25rem_1.125rem_1rem] items-center gap-x-2 rounded-md px-1.5 py-1",
+        openThread === null
+          ? null
+          : "cursor-pointer hover:bg-accent/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+      )}
+    >
       <span className="col-start-1 row-start-1 flex items-center">
         <StatusDot status={agent.status} />
       </span>
@@ -318,9 +357,11 @@ function WorkflowScriptView({
 function PhaseSection({
   phase,
   defaultOpen = false,
+  onOpenThread,
 }: {
   phase: AgentPanelWorkflowGroup["phases"][number];
   defaultOpen?: boolean;
+  onOpenThread?: ((threadId: ThreadId) => void) | undefined;
 }) {
   const [open, setOpen] = useState(defaultOpen || phase.state === "running");
   const previousState = useRef(phase.state);
@@ -369,7 +410,11 @@ function PhaseSection({
           </span>
         ) : null}
       </button>
-      {open ? phase.members.map((member) => <AgentRow key={member.id} agent={member} />) : null}
+      {open
+        ? phase.members.map((member) => (
+            <AgentRow key={member.id} agent={member} onOpenThread={onOpenThread} />
+          ))
+        : null}
     </div>
   );
 }
@@ -379,11 +424,13 @@ function ExpandedWorkflowSection({
   group,
   environmentId,
   threadId,
+  onOpenThread,
   onCollapse,
 }: {
   group: AgentPanelWorkflowGroup;
   environmentId: EnvironmentId | null;
   threadId: ThreadId | null;
+  onOpenThread?: ((threadId: ThreadId) => void) | undefined;
   onCollapse: () => void;
 }) {
   const [scriptOpen, setScriptOpen] = useState(false);
@@ -439,13 +486,18 @@ function ExpandedWorkflowSection({
         />
       ) : null}
       {group.phases.map((phase) => (
-        <PhaseSection key={phase.index} phase={phase} defaultOpen={!workflowIsLive(group)} />
+        <PhaseSection
+          key={phase.index}
+          phase={phase}
+          defaultOpen={!workflowIsLive(group)}
+          onOpenThread={onOpenThread}
+        />
       ))}
       {group.unphasedMembers.map((member) => (
-        <AgentRow key={member.id} agent={member} />
+        <AgentRow key={member.id} agent={member} onOpenThread={onOpenThread} />
       ))}
       {group.phases.length === 0 && group.unphasedMembers.length === 0 ? (
-        <AgentRow agent={group.workflow} />
+        <AgentRow agent={group.workflow} onOpenThread={onOpenThread} />
       ) : null}
     </section>
   );
@@ -503,10 +555,12 @@ function WorkflowSection({
   group,
   environmentId,
   threadId,
+  onOpenThread,
 }: {
   group: AgentPanelWorkflowGroup;
   environmentId: EnvironmentId | null;
   threadId: ThreadId | null;
+  onOpenThread?: ((threadId: ThreadId) => void) | undefined;
 }) {
   const [open, setOpen] = useState(() => workflowIsLive(group));
   return open ? (
@@ -514,6 +568,7 @@ function WorkflowSection({
       group={group}
       environmentId={environmentId}
       threadId={threadId}
+      onOpenThread={onOpenThread}
       onCollapse={() => setOpen(false)}
     />
   ) : (
@@ -525,10 +580,12 @@ export function AgentsPanel({
   model,
   environmentId = null,
   threadId = null,
+  onOpenThread,
 }: {
   model: AgentPanelModel;
   environmentId?: EnvironmentId | null;
   threadId?: ThreadId | null;
+  onOpenThread?: ((threadId: ThreadId) => void) | undefined;
 }) {
   if (!model.hasAgents) {
     return (
@@ -553,6 +610,7 @@ export function AgentsPanel({
               group={group}
               environmentId={environmentId}
               threadId={threadId}
+              onOpenThread={onOpenThread}
             />
           ))}
           {model.directAgents.length > 0 ? (
@@ -561,7 +619,7 @@ export function AgentsPanel({
                 Direct spawns
               </div>
               {model.directAgents.map((agent) => (
-                <AgentRow key={agent.id} agent={agent} />
+                <AgentRow key={agent.id} agent={agent} onOpenThread={onOpenThread} />
               ))}
             </section>
           ) : null}

@@ -184,7 +184,15 @@ const make = Effect.fn("desktop.environment.make")(function* (
     joinPath: path.join,
     t3Home: config.t3Home,
   });
-  const userDataDirName = isDevelopment ? "t3code-dev" : "t3code";
+  // Electron scopes both the Chromium profile and the single-instance lock to
+  // this directory, so a locally built T3 sharing it with an installed one
+  // fights over the same LevelDB files and can focus the wrong window. The
+  // override lets a fork run beside a stable install.
+  const defaultUserDataDirName = isDevelopment ? "t3code-dev" : "t3code";
+  const userDataDirName = Option.getOrElse(
+    config.userDataDirNameOverride,
+    () => defaultUserDataDirName,
+  );
   const legacyUserDataDirName = isDevelopment ? "T3 Code (Dev)" : "T3 Code (Alpha)";
   const linuxApplicationsDir = path.join(
     Option.getOrElse(config.xdgDataHome, () => path.join(homeDirectory, ".local", "share")),
